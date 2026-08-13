@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HelpMe Card</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no, maximum-scale=1">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="HelpMe Card">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+    background: #000;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .scene {
+    position: fixed;
+    inset: 0;
+    perspective: 800px;
+    perspective-origin: 50% 50%;
+  }
+
+  .card {
+    position: absolute;
+    inset: 0;
+    transform-style: preserve-3d;
+    transition: transform 0.55s cubic-bezier(0.4, 0.0, 0.2, 1);
+  }
+
+  .face {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+    pointer-events: none;
+  }
+
+  .face.back { transform: rotateY(180deg); }
+
+  /* preserveAspectRatio letterboxes the viewBox inside this box, matching
+     object-fit: contain on the back img. front.svg paints artwork beyond its
+     viewBox, which is clipped in JS so the overflow cannot reach these edges. */
+  .face > svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+</style>
+</head>
+<body>
+  <div class="scene">
+    <div class="card" id="card">
+      <div class="face front" id="front"></div>
+      <img class="face back" src="./images/back.svg" alt="">
+    </div>
+  </div>
+
+<script>
+  var card = document.getElementById('card');
+  var turns = 0;
+
+  // Ids of the <text> layers in front.svg. These come from the Sketch layer
+  // names, so re-exporting the artboard with renamed layers will break them.
+  var NAME_ID = 'Kathy-Cook';
+  var EMAIL_ID = 'kcook@helpmebrands.c';
+
+  // Card is 2126 units wide; keep replacement text inside a margin.
+  var MAX_TEXT_WIDTH = 1800;
+
+  function setField(svg, id, value) {
+    if (!value) return;
+    var text = svg.getElementById(id);
+    if (!text) return;
+    var tspan = text.querySelector('tspan') || text;
+
+    // Capture where the designer centred the original string, then re-anchor
+    // to that point so a longer or shorter value stays centred rather than
+    // growing rightwards off the hardcoded x origin.
+    var original = tspan.getBBox();
+    var centre = original.x + original.width / 2;
+
+    tspan.textContent = value;
+
+    var replaced = tspan.getBBox();
+    if (replaced.width > MAX_TEXT_WIDTH) {
+      var size = parseFloat(text.getAttribute('font-size'));
+      text.setAttribute('font-size', size * MAX_TEXT_WIDTH / replaced.width);
+    }
+
+    tspan.setAttribute('text-anchor', 'middle');
+    tspan.setAttribute('x', centre);
+  }
+
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+
+  // The artboard paints past its viewBox (stray paths reach x=5451). An <img>
+  // clips that automatically; an inlined <svg> does not, so it would bleed into
+  // the letterbox bars. Wrap the whole tree in a clip of the viewBox instead.
+  function clipToViewBox(svg) {
+    var box = svg.getAttribute('viewBox').split(/[\s,]+/).map(Number);
+    var rect = document.createElementNS(SVG_NS, 'rect');
+    rect.setAttribute('x', box[0]);
+    rect.setAttribute('y', box[1]);
+    rect.setAttribute('width', box[2]);
+    rect.setAttribute('height', box[3]);
+
+    var clip = document.createElementNS(SVG_NS, 'clipPath');
+    clip.setAttribute('id', 'card-clip');
+    clip.appendChild(rect);
+
+    var group = document.createElementNS(SVG_NS, 'g');
+    group.setAttribute('clip-path', 'url(#card-clip)');
+    while (svg.firstChild) group.appendChild(svg.firstChild);
+
+    var defs = document.createElementNS(SVG_NS, 'defs');
+    defs.appendChild(clip);
+    svg.appendChild(defs);
+    svg.appendChild(group);
+  }
+
+  var params = new URLSearchParams(location.search);
+
+  fetch('./images/front.svg')
+    .then(function (r) { return r.text(); })
+    .then(function (markup) {
+      var doc = new DOMParser().parseFromString(markup, 'image/svg+xml');
+      var svg = document.importNode(doc.documentElement, true);
+      // Drop the fixed px size so the CSS 100%/100% rule governs scaling.
+      svg.removeAttribute('width');
+      svg.removeAttribute('height');
+      clipToViewBox(svg);
+      // Must be in the rendered tree before getBBox() will measure text.
+      document.getElementById('front').appendChild(svg);
+      setField(svg, NAME_ID, params.get('name'));
+      setField(svg, EMAIL_ID, params.get('email'));
+    });
+
+  document.addEventListener('click', function () {
+    turns += 1;
+    card.style.transform = 'rotateY(' + (turns * 180) + 'deg)';
+  });
+
+  // Block pinch-zoom and double-tap zoom.
+  document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
+  document.addEventListener('touchmove', function (e) {
+    if (e.touches.length > 1) e.preventDefault();
+  }, { passive: false });
+
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('./sw.js');
+    });
+  }
+</script>
+</body>
+</html>
