@@ -170,6 +170,8 @@
   // Angular velocity, in deg/s, past which releasing completes the turn even
   // short of halfway: a flick carries through on momentum.
   var FLICK = 220;
+  // How far off a flat orientation the card may be and still change axis.
+  var AXIS_SNAP = 20;
 
   // The card is simulated rather than animated. A frame loop integrates a
   // damped spring toward the resting angle, so the card's angle and velocity
@@ -266,6 +268,22 @@
     setTransform(angle);
   }
 
+  // The two axes coincide at every flat orientation: rotateY(0) renders the
+  // same as rotateX(0), and rotateY(180) the same as rotateX(180). So the axis
+  // can be re-chosen whenever the card is near enough to flat that snapping it
+  // there does not read as a jump -- not only when it has fully stopped. Part
+  // turned, there is no equivalent angle about the other axis and the swap has
+  // to wait. Velocity is dropped because it belonged to the old axis.
+  function trySwitchAxis(next) {
+    if (next === axis) return false;
+    var flat = Math.round(angle / 180) * 180;
+    if (Math.abs(angle - flat) > AXIS_SNAP) return false;
+    angle = flat;
+    vel = 0;
+    useAxis(next);
+    return true;
+  }
+
   function zoneAt(x, y, rect) {
     var dx = x - (rect.left + rect.width / 2);
     var dy = y - (rect.top + rect.height / 2);
@@ -302,7 +320,7 @@
     stopLoop();
     grab = { id: e.pointerId, x0: e.clientX, y0: e.clientY, rect: rect,
              zone: zoneAt(e.clientX, e.clientY, rect), base: angle,
-             fromRest: settled, moved: false,
+             moved: false,
              vel: 0, lastT: e.timeStamp, lastDeg: 0 };
     settled = false;
     card.setPointerCapture(e.pointerId);
@@ -315,10 +333,11 @@
     if (!grab.moved) {
       if (Math.abs(dx) < DRAG_MIN && Math.abs(dy) < DRAG_MIN) return;
       grab.moved = true;
-      // The axis may only be re-chosen from rest: a part-turned card has no
-      // equivalent angle about the other axis, so switching in flight would
-      // jump. Caught in motion, it keeps turning on the axis it is already on.
-      if (grab.fromRest) useAxis(Math.abs(dx) >= Math.abs(dy) ? 'Y' : 'X');
+      // Works in flight, not only from rest: near a flat orientation the card
+      // snaps and swaps axis, so a swipe across the previous one is picked up.
+      if (trySwitchAxis(Math.abs(dx) >= Math.abs(dy) ? 'Y' : 'X')) {
+        grab.base = angle;
+      }
     }
     // Drag reads as pushing the card's surface: swipe right and the right edge
     // travels away from the viewer; swipe up and the top edge rolls away.
@@ -344,9 +363,9 @@
     grab = null;
 
     if (!g.moved) {
-      // A tap. From rest the press position picks the axis; in flight the axis
-      // is already committed, so only the direction comes from the press.
-      if (g.fromRest) useAxis(g.zone.axis);
+      // A tap. The press position picks the axis whenever the card is flat
+      // enough to allow it; otherwise only the direction comes from the press.
+      trySwitchAxis(g.zone.axis);
       target = (Math.round(angle / 180) + g.zone.dir) * 180;
     } else {
       vel = g.vel;
@@ -372,6 +391,7 @@
     ['OMEGA',         4,   30,  0.5],
     ['ZETA',       0.05,    1, 0.01],
     ['FLICK',         0,  800,   10],
+    ['AXIS_SNAP',     0,   90,    1],
     ['SWIPE_FULL',  0.1,    1, 0.01],
     ['CENTRE_BAND', 0.05, 0.5, 0.01]
   ];
