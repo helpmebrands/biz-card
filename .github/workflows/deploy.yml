@@ -1,0 +1,48 @@
+name: Deploy to GitHub Pages
+
+# A merge into main lands as a push to main, so this covers both merges and
+# direct pushes. workflow_dispatch allows a manual redeploy from the Actions tab.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let an in-flight deploy finish rather than cancelling it, so main and Pages
+# cannot end up out of sync.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Pages is not yet enabled on this repo; enablement turns it on with the
+      # GitHub Actions source on the first run instead of failing.
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      # The app is plain static files, so the repo root ships as-is. No build
+      # step, and no .nojekyll needed: this action uploads an artifact directly
+      # rather than running the content through Jekyll.
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
