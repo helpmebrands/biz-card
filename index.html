@@ -166,9 +166,12 @@
   var CENTRE_BAND = 0.25;
   // Drag distance, as a fraction of card size, that equals a full half-turn.
   var SWIPE_FULL = 0.45;
+  // Movement before a press counts as a swipe rather than a tap.
+  var DRAG_MIN = 6;
+  // A tap plays the whole half-turn, so it gets longer than a swipe settle,
+  // which only has to finish off rotation the finger already did.
+  var TAP_MS = 900;
   var SETTLE_MS = 450;
-  // Overshoot past the target and ease back: the bounce on settling.
-  var BOUNCE = 'cubic-bezier(0.34, 1.56, 0.64, 1)';
 
   var angle = 0;      // resting angle, normalised to exactly 0 or 180
   var axis = 'Y';     // axis the resting angle is expressed about
@@ -177,8 +180,38 @@
   var flipPending = false;
   var settleTimer = null;
 
+  function rot(a) {
+    return 'rotate' + axis + '(' + a + 'deg)';
+  }
+
   function setTransform(a) {
-    card.style.transform = 'rotate' + axis + '(' + a + 'deg)';
+    card.style.transform = rot(a);
+  }
+
+  // Degrees past the target on each successive crossing, shrinking so the card
+  // wobbles into place. A cubic-bezier can only overshoot once, so the settle
+  // is played as keyframes instead of a transition.
+  var WOBBLE = [15, -6.5, 2.8, -1.1];
+  var WOBBLE_AT = [0.58, 0.72, 0.84, 0.93];
+
+  function animateTo(from, to, ms) {
+    // Land on the resting value first: if the animation cannot run, the card is
+    // already correct rather than stranded mid-turn.
+    card.style.transition = 'none';
+    setTransform(to);
+
+    var delta = to - from;
+    // Scale the wobble down for short travel, so a barely-moved swipe that
+    // springs back does not shake harder than the distance it covered.
+    var amp = (delta >= 0 ? 1 : -1) * Math.min(1, Math.abs(delta) / 90);
+    var frames = [{ offset: 0, transform: rot(from),
+                    easing: 'cubic-bezier(0.32, 0, 0.2, 1)' }];
+    for (var i = 0; i < WOBBLE.length; i++) {
+      frames.push({ offset: WOBBLE_AT[i], transform: rot(to + WOBBLE[i] * amp),
+                    easing: 'ease-in-out' });
+    }
+    frames.push({ offset: 1, transform: rot(to) });
+    return card.animate(frames, { duration: ms, fill: 'none' });
   }
 
   function withoutTransition(fn) {
@@ -208,12 +241,14 @@
     return { axis: 'Y', dir: dx > 0 ? 1 : -1 };    // right edge back, or left
   }
 
-  // Rotation grows as the pressed edge is dragged toward the card's centre,
-  // which is the direction that edge visually travels as it recedes.
-  function progressOf(d) {
+  // A swipe reads as dragging the card's surface: swipe right and the surface
+  // travels right, carrying the right edge away from the viewer; swipe up and
+  // the top edge rolls away. Signed, so the card follows the finger back if the
+  // swipe reverses mid-gesture.
+  function swipeTurn(d) {
     var span = d.axis === 'Y' ? d.rect.width : d.rect.height;
-    var moved = d.axis === 'Y' ? -d.dir * d.dx : d.dir * d.dy;
-    return Math.max(0, Math.min(1, moved / (span * SWIPE_FULL)));
+    var moved = d.axis === 'Y' ? d.dx : -d.dy;
+    return Math.max(-1, Math.min(1, moved / (span * SWIPE_FULL)));
   }
 
   function finalize() {
@@ -232,10 +267,11 @@
   card.addEventListener('pointerdown', function (e) {
     if (busy) return; // one gesture at a time; taps during a settle are dropped
     var rect = card.getBoundingClientRect();
-    var zone = zoneAt(e.clientX, e.clientY, rect);
-    useAxis(zone.axis);
+    // The axis is not chosen yet: a tap takes it from this position, a swipe
+    // takes it from the direction the finger ends up travelling.
     drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, dx: 0, dy: 0,
-             dir: zone.dir, axis: zone.axis, rect: rect, moved: false, p: 0 };
+             zone: zoneAt(e.clientX, e.clientY, rect), axis: axis,
+             rect: rect, moved: false, turn: 0 };
     card.style.transition = 'none';
     card.setPointerCapture(e.pointerId);
   });
@@ -244,32 +280,47 @@
     if (!drag || e.pointerId !== drag.id) return;
     drag.dx = e.clientX - drag.x0;
     drag.dy = e.clientY - drag.y0;
-    if (Math.abs(drag.dx) > 6 || Math.abs(drag.dy) > 6) drag.moved = true;
-    drag.p = progressOf(drag);
-    setTransform(angle + drag.dir * 180 * drag.p);
+    if (!drag.moved) {
+      if (Math.abs(drag.dx) < DRAG_MIN && Math.abs(drag.dy) < DRAG_MIN) return;
+      drag.moved = true;
+      // Lock the axis to the swipe's dominant direction, once, and do it while
+      // the card is still at rest so swapping the hidden face is unseen.
+      drag.axis = Math.abs(drag.dx) >= Math.abs(drag.dy) ? 'Y' : 'X';
+      useAxis(drag.axis);
+      card.style.transition = 'none';
+    }
+    drag.turn = swipeTurn(drag);
+    setTransform(angle + 180 * drag.turn);
   });
 
   function release(e) {
     if (!drag || e.pointerId !== drag.id) return;
     var d = drag;
     drag = null;
-    // A tap always completes a turn. A swipe settles to whichever side of the
-    // halfway tipping point it was let go on.
-    flipPending = d.moved ? d.p > 0.5 : true;
+    var offset;
+    if (!d.moved) {
+      // A tap: press position picks axis and direction, and always completes.
+      useAxis(d.zone.axis);
+      flipPending = true;
+      offset = d.zone.dir * 180;
+    } else {
+      // A swipe settles to whichever side of the halfway tipping point it was
+      // let go on, carrying on the way it was already travelling.
+      flipPending = Math.abs(d.turn) > 0.5;
+      offset = flipPending ? (d.turn > 0 ? 180 : -180) : 0;
+    }
+    var ms = d.moved ? SETTLE_MS : TAP_MS;
     busy = true;
-    card.style.transition = 'transform ' + SETTLE_MS + 'ms ' + BOUNCE;
-    setTransform(angle + (flipPending ? d.dir * 180 : 0));
-    // Releasing at rest changes nothing, so transitionend may never fire.
+    // Arm the fallback before animating, so a thrown animate() cannot strand
+    // the gesture with busy stuck true.
     clearTimeout(settleTimer);
-    settleTimer = setTimeout(finalize, SETTLE_MS + 80);
+    settleTimer = setTimeout(finalize, ms + 90);
+    var anim = animateTo(angle + (d.moved ? 180 * d.turn : 0), angle + offset, ms);
+    if (anim) anim.onfinish = finalize;
   }
 
   card.addEventListener('pointerup', release);
   card.addEventListener('pointercancel', release);
-
-  card.addEventListener('transitionend', function (e) {
-    if (e.target === card && e.propertyName === 'transform') finalize();
-  });
 
   // Block pinch-zoom and double-tap zoom.
   document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
