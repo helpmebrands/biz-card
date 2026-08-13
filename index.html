@@ -179,6 +179,7 @@
   var busy = false;
   var flipPending = false;
   var settleTimer = null;
+  var settleAnim = null;
 
   function rot(a) {
     return 'rotate' + axis + '(' + a + 'deg)';
@@ -188,30 +189,55 @@
     card.style.transform = rot(a);
   }
 
-  // Degrees past the target on each successive crossing, shrinking so the card
-  // wobbles into place. A cubic-bezier can only overshoot once, so the settle
-  // is played as keyframes instead of a transition.
-  var WOBBLE = [15, -6.5, 2.8, -1.1];
-  var WOBBLE_AT = [0.58, 0.72, 0.84, 0.93];
+  // A cubic-bezier can only overshoot once, so the settle is played as
+  // keyframes. Both the size of the overshoot and how many times the card
+  // crosses the resting angle scale with how far it still has to travel: a
+  // full half-turn gets the hardest throw and all MAX_PASSES crossings, while
+  // a nudge that springs back barely wobbles at all.
+  var OVERSHOOT = 30;     // degrees past the target on the first crossing
+  var DAMPING = 0.3;      // each crossing keeps this fraction of the last
+  var MAX_PASSES = 4;
+  var TRAVEL_END = 0.55;  // fraction of the run spent reaching the target
+  var PASS_DECAY = 0.72;  // later crossings happen closer together
+
+  function wobbleFrames(from, to) {
+    var delta = to - from;
+    var strength = Math.min(1, Math.abs(delta) / 180);
+    var lead = delta >= 0 ? 1 : -1;
+    var passes = Math.min(MAX_PASSES, Math.round(strength * MAX_PASSES));
+
+    var frames = [{ offset: 0, transform: rot(from),
+                    easing: 'cubic-bezier(0.3, 0, 0.15, 1)' }];
+
+    var weights = [], total = 0, i;
+    for (i = 0; i <= passes; i++) {
+      weights.push(Math.pow(PASS_DECAY, i));
+      total += weights[i];
+    }
+    var acc = 0;
+    for (i = 0; i < passes; i++) {
+      acc += weights[i];
+      var amp = OVERSHOOT * Math.pow(DAMPING, i) * strength * (i % 2 ? -lead : lead);
+      frames.push({
+        offset: +(TRAVEL_END + (1 - TRAVEL_END) * acc / total).toFixed(4),
+        transform: rot(to + amp),
+        easing: 'ease-in-out'
+      });
+    }
+    frames.push({ offset: 1, transform: rot(to) });
+    return frames;
+  }
 
   function animateTo(from, to, ms) {
     // Land on the resting value first: if the animation cannot run, the card is
     // already correct rather than stranded mid-turn.
     card.style.transition = 'none';
     setTransform(to);
-
-    var delta = to - from;
-    // Scale the wobble down for short travel, so a barely-moved swipe that
-    // springs back does not shake harder than the distance it covered.
-    var amp = (delta >= 0 ? 1 : -1) * Math.min(1, Math.abs(delta) / 90);
-    var frames = [{ offset: 0, transform: rot(from),
-                    easing: 'cubic-bezier(0.32, 0, 0.2, 1)' }];
-    for (var i = 0; i < WOBBLE.length; i++) {
-      frames.push({ offset: WOBBLE_AT[i], transform: rot(to + WOBBLE[i] * amp),
-                    easing: 'ease-in-out' });
-    }
-    frames.push({ offset: 1, transform: rot(to) });
-    return card.animate(frames, { duration: ms, fill: 'none' });
+    // Release the previous run rather than letting finished animations pile up
+    // on the element over a long session.
+    if (settleAnim) settleAnim.cancel();
+    settleAnim = card.animate(wobbleFrames(from, to), { duration: ms, fill: 'none' });
+    return settleAnim;
   }
 
   function withoutTransition(fn) {
