@@ -38,7 +38,6 @@
     position: absolute;
     inset: 0;
     transform-style: preserve-3d;
-    transition: transform 0.55s cubic-bezier(0.4, 0.0, 0.2, 1);
     /* Own the gesture outright: the browser must not claim the drag for
        panning, or pointermove stops firing part-way through a swipe. */
     touch-action: none;
@@ -168,18 +167,33 @@
   var SWIPE_FULL = 0.45;
   // Movement before a press counts as a swipe rather than a tap.
   var DRAG_MIN = 6;
-  // A tap plays the whole half-turn, so it gets longer than a swipe settle,
-  // which only has to finish off rotation the finger already did.
-  var TAP_MS = 900;
-  var SETTLE_MS = 450;
+  // Angular velocity, in deg/s, past which releasing completes the turn even
+  // short of halfway: a flick carries through on momentum.
+  var FLICK = 220;
 
-  var angle = 0;      // resting angle, normalised to exactly 0 or 180
-  var axis = 'Y';     // axis the resting angle is expressed about
-  var drag = null;
-  var busy = false;
-  var flipPending = false;
-  var settleTimer = null;
-  var settleAnim = null;
+  // The card is simulated rather than animated. A frame loop integrates a
+  // damped spring toward the resting angle, so the card's angle and velocity
+  // are known at every instant -- which is what lets a new gesture take it
+  // over mid-flight instead of waiting for the motion to finish.
+  //
+  //   acceleration = -w^2 * (angle - target) - 2*z*w * velocity
+  //
+  var OMEGA = 5.5;       // angular frequency: higher is stiffer and quicker
+  var ZETA = 0.45;       // damping ratio: under 1 oscillates, 1 is a dead stop
+  // Coming to rest is decided by amplitude and speed, never by a bounce count,
+  // so slack damping simply oscillates more times before it stops.
+  var SETTLE_EPS = 0.4;  // deg from the target that counts as arrived
+  var SETTLE_VEL = 8;    // deg/s below which the card counts as stopped
+  var MAX_STEP = 0.008;  // integrator sub-step; a long frame is split into these
+
+  var angle = 0;      // current rotation, continuous while in motion
+  var vel = 0;        // angular velocity, deg/s
+  var target = 0;     // resting angle currently being sprung toward
+  var axis = 'Y';     // axis the rotation is expressed about
+  var settled = true;
+  var grab = null;
+  var frameReq = null;
+  var lastFrame = 0;
 
   function rot(a) {
     return 'rotate' + axis + '(' + a + 'deg)';
@@ -189,73 +203,67 @@
     card.style.transform = rot(a);
   }
 
-  // A cubic-bezier can only overshoot once, so the settle is played as
-  // keyframes. Both the size of the overshoot and how many times the card
-  // crosses the resting angle scale with how far it still has to travel: a
-  // full half-turn gets the hardest throw and all MAX_PASSES crossings, while
-  // a nudge that springs back barely wobbles at all.
-  var OVERSHOOT = 30;     // degrees past the target on the first crossing
-  var DAMPING = 0.3;      // each crossing keeps this fraction of the last
-  var MAX_PASSES = 4;
-  var TRAVEL_END = 0.55;  // fraction of the run spent reaching the target
-  var PASS_DECAY = 0.72;  // later crossings happen closer together
-
-  function wobbleFrames(from, to) {
-    var delta = to - from;
-    var strength = Math.min(1, Math.abs(delta) / 180);
-    var lead = delta >= 0 ? 1 : -1;
-    var passes = Math.min(MAX_PASSES, Math.round(strength * MAX_PASSES));
-
-    var frames = [{ offset: 0, transform: rot(from),
-                    easing: 'cubic-bezier(0.3, 0, 0.15, 1)' }];
-
-    var weights = [], total = 0, i;
-    for (i = 0; i <= passes; i++) {
-      weights.push(Math.pow(PASS_DECAY, i));
-      total += weights[i];
+  // Semi-implicit Euler. Sub-stepping keeps a dropped frame from turning into a
+  // huge integration step, which at stiff settings would read as a lurch.
+  function integrate(dt) {
+    var n = Math.max(1, Math.ceil(dt / MAX_STEP));
+    var h = dt / n;
+    var k = OMEGA * OMEGA;
+    var c = 2 * ZETA * OMEGA;
+    for (var i = 0; i < n; i++) {
+      vel += (-k * (angle - target) - c * vel) * h;
+      angle += vel * h;
     }
-    var acc = 0;
-    for (i = 0; i < passes; i++) {
-      acc += weights[i];
-      var amp = OVERSHOOT * Math.pow(DAMPING, i) * strength * (i % 2 ? -lead : lead);
-      frames.push({
-        offset: +(TRAVEL_END + (1 - TRAVEL_END) * acc / total).toFixed(4),
-        transform: rot(to + amp),
-        easing: 'ease-in-out'
-      });
-    }
-    frames.push({ offset: 1, transform: rot(to) });
-    return frames;
   }
 
-  function animateTo(from, to, ms) {
-    // Land on the resting value first: if the animation cannot run, the card is
-    // already correct rather than stranded mid-turn.
-    card.style.transition = 'none';
-    setTransform(to);
-    // Release the previous run rather than letting finished animations pile up
-    // on the element over a long session.
-    if (settleAnim) settleAnim.cancel();
-    settleAnim = card.animate(wobbleFrames(from, to), { duration: ms, fill: 'none' });
-    return settleAnim;
+  // Fold the resting angle back into 0 or 180. Every multiple of 180 is one of
+  // those two orientations, so this is invisible, and it keeps the value bounded
+  // no matter how many turns have been made.
+  function comeToRest() {
+    angle = ((target % 360) + 360) % 360;
+    target = angle;
+    vel = 0;
+    settled = true;
   }
 
-  function withoutTransition(fn) {
-    card.style.transition = 'none';
-    fn();
-    void card.offsetWidth; // flush, so the change cannot be animated
-    card.style.transition = '';
+  function frame(now) {
+    frameReq = null;
+    var dt = Math.min(0.05, (now - lastFrame) / 1000);
+    lastFrame = now;
+    integrate(dt);
+    if (Math.abs(angle - target) < SETTLE_EPS && Math.abs(vel) < SETTLE_VEL) {
+      comeToRest();
+      setTransform(angle);
+      return;
+    }
+    setTransform(angle);
+    frameReq = requestAnimationFrame(frame);
+  }
+
+  function startLoop() {
+    settled = false;
+    if (frameReq === null) {
+      lastFrame = performance.now();
+      frameReq = requestAnimationFrame(frame);
+    }
+  }
+
+  function stopLoop() {
+    if (frameReq !== null) {
+      cancelAnimationFrame(frameReq);
+      frameReq = null;
+    }
   }
 
   // The hidden face must be pre-rotated about the SAME axis the card turns on,
   // otherwise it lands upside down: rotateX(180) on the card composed with
-  // rotateY(180) on the face equals rotateZ(180). Switching both together is
-  // invisible, because either pairing renders the same face upright.
+  // rotateY(180) on the face equals rotateZ(180). Only ever called at rest,
+  // where either pairing renders the same face upright, so the swap is unseen.
   function useAxis(next) {
     if (next === axis) return;
     axis = next;
     back.style.transform = 'rotate' + axis + '(180deg)';
-    withoutTransition(function () { setTransform(angle); });
+    setTransform(angle);
   }
 
   function zoneAt(x, y, rect) {
@@ -267,86 +275,202 @@
     return { axis: 'Y', dir: dx > 0 ? 1 : -1 };    // right edge back, or left
   }
 
-  // A swipe reads as dragging the card's surface: swipe right and the surface
-  // travels right, carrying the right edge away from the viewer; swipe up and
-  // the top edge rolls away. Signed, so the card follows the finger back if the
-  // swipe reverses mid-gesture.
-  function swipeTurn(d) {
-    var span = d.axis === 'Y' ? d.rect.width : d.rect.height;
-    var moved = d.axis === 'Y' ? d.dx : -d.dy;
-    return Math.max(-1, Math.min(1, moved / (span * SWIPE_FULL)));
-  }
-
-  function finalize() {
-    clearTimeout(settleTimer);
-    if (!busy) return;
-    busy = false;
-    if (!flipPending) return;
-    flipPending = false;
-    // Land on 0 or 180 only. The value just animated to may be -180 or 360,
-    // which are the same orientations, so re-stating it is invisible and keeps
-    // the angle from ever growing without bound.
-    angle = angle === 0 ? 180 : 0;
-    withoutTransition(function () { setTransform(angle); });
+  // Run the same integrator off-screen, so the tuning panel reports what will
+  // actually happen rather than a separate approximation of it.
+  function simulate(from, to, v0) {
+    var x = from, v = v0, t = 0, h = 0.004, i = 0, prevV = v0, peaks = [];
+    var k = OMEGA * OMEGA, c = 2 * ZETA * OMEGA;
+    while (t < 30) {
+      v += (-k * (x - to) - c * v) * h;
+      x += v * h;
+      t += h;
+      if (i > 0 && (prevV > 0) !== (v > 0) && Math.abs(x - to) > 0.3) {
+        peaks.push(Math.round((x - to) * 10) / 10);
+      }
+      prevV = v;
+      i++;
+      if (Math.abs(x - to) < SETTLE_EPS && Math.abs(v) < SETTLE_VEL) break;
+    }
+    return { ms: t * 1000, peaks: peaks };
   }
 
   card.addEventListener('pointerdown', function (e) {
-    if (busy) return; // one gesture at a time; taps during a settle are dropped
     var rect = card.getBoundingClientRect();
-    // The axis is not chosen yet: a tap takes it from this position, a swipe
-    // takes it from the direction the finger ends up travelling.
-    drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, dx: 0, dy: 0,
-             zone: zoneAt(e.clientX, e.clientY, rect), axis: axis,
-             rect: rect, moved: false, turn: 0 };
-    card.style.transition = 'none';
+    // Take the card over wherever it happens to be. Its angle carries into the
+    // drag and its velocity is left intact, so grabbing mid-flight is seamless
+    // and a tap mid-flight keeps the momentum already in play.
+    stopLoop();
+    grab = { id: e.pointerId, x0: e.clientX, y0: e.clientY, rect: rect,
+             zone: zoneAt(e.clientX, e.clientY, rect), base: angle,
+             fromRest: settled, moved: false,
+             vel: 0, lastT: e.timeStamp, lastDeg: 0 };
+    settled = false;
     card.setPointerCapture(e.pointerId);
   });
 
   card.addEventListener('pointermove', function (e) {
-    if (!drag || e.pointerId !== drag.id) return;
-    drag.dx = e.clientX - drag.x0;
-    drag.dy = e.clientY - drag.y0;
-    if (!drag.moved) {
-      if (Math.abs(drag.dx) < DRAG_MIN && Math.abs(drag.dy) < DRAG_MIN) return;
-      drag.moved = true;
-      // Lock the axis to the swipe's dominant direction, once, and do it while
-      // the card is still at rest so swapping the hidden face is unseen.
-      drag.axis = Math.abs(drag.dx) >= Math.abs(drag.dy) ? 'Y' : 'X';
-      useAxis(drag.axis);
-      card.style.transition = 'none';
+    if (!grab || e.pointerId !== grab.id) return;
+    var dx = e.clientX - grab.x0;
+    var dy = e.clientY - grab.y0;
+    if (!grab.moved) {
+      if (Math.abs(dx) < DRAG_MIN && Math.abs(dy) < DRAG_MIN) return;
+      grab.moved = true;
+      // The axis may only be re-chosen from rest: a part-turned card has no
+      // equivalent angle about the other axis, so switching in flight would
+      // jump. Caught in motion, it keeps turning on the axis it is already on.
+      if (grab.fromRest) useAxis(Math.abs(dx) >= Math.abs(dy) ? 'Y' : 'X');
     }
-    drag.turn = swipeTurn(drag);
-    setTransform(angle + 180 * drag.turn);
+    // Drag reads as pushing the card's surface: swipe right and the right edge
+    // travels away from the viewer; swipe up and the top edge rolls away.
+    var span = axis === 'Y' ? grab.rect.width : grab.rect.height;
+    var moved = axis === 'Y' ? dx : -dy;
+    var deg = 180 * moved / (span * SWIPE_FULL);
+    angle = grab.base + deg;
+
+    // Smoothed, so the throw comes from the gesture rather than from whatever
+    // jitter the last touch sample happened to carry.
+    var dt = e.timeStamp - grab.lastT;
+    if (dt > 0) {
+      grab.vel = grab.vel * 0.55 + ((deg - grab.lastDeg) / dt * 1000) * 0.45;
+      grab.lastT = e.timeStamp;
+      grab.lastDeg = deg;
+    }
+    setTransform(angle);
   });
 
   function release(e) {
-    if (!drag || e.pointerId !== drag.id) return;
-    var d = drag;
-    drag = null;
-    var offset;
-    if (!d.moved) {
-      // A tap: press position picks axis and direction, and always completes.
-      useAxis(d.zone.axis);
-      flipPending = true;
-      offset = d.zone.dir * 180;
+    if (!grab || e.pointerId !== grab.id) return;
+    var g = grab;
+    grab = null;
+
+    if (!g.moved) {
+      // A tap. From rest the press position picks the axis; in flight the axis
+      // is already committed, so only the direction comes from the press.
+      if (g.fromRest) useAxis(g.zone.axis);
+      target = (Math.round(angle / 180) + g.zone.dir) * 180;
     } else {
-      // A swipe settles to whichever side of the halfway tipping point it was
-      // let go on, carrying on the way it was already travelling.
-      flipPending = Math.abs(d.turn) > 0.5;
-      offset = flipPending ? (d.turn > 0 ? 180 : -180) : 0;
+      vel = g.vel;
+      var turns = angle / 180;
+      // Thrown hard enough and it carries to the next face; otherwise it falls
+      // to whichever side of the halfway point it was let go on.
+      target = 180 * (Math.abs(vel) > FLICK
+        ? (vel > 0 ? Math.floor(turns) + 1 : Math.ceil(turns) - 1)
+        : Math.round(turns));
     }
-    var ms = d.moved ? SETTLE_MS : TAP_MS;
-    busy = true;
-    // Arm the fallback before animating, so a thrown animate() cannot strand
-    // the gesture with busy stuck true.
-    clearTimeout(settleTimer);
-    settleTimer = setTimeout(finalize, ms + 90);
-    var anim = animateTo(angle + (d.moved ? 180 * d.turn : 0), angle + offset, ms);
-    if (anim) anim.onfinish = finalize;
+    startLoop();
   }
 
   card.addEventListener('pointerup', release);
   card.addEventListener('pointercancel', release);
+
+  // --- Tuning panel --------------------------------------------------------
+  // Enabled with ?debug on the URL, so it costs nothing in normal use. These
+  // names are top-level vars, hence window[name] reaches them: a slider writes
+  // straight to the live value and the next tap uses it immediately.
+
+  var TUNABLES = [
+    ['OMEGA',         4,   30,  0.5],
+    ['ZETA',       0.05,    1, 0.01],
+    ['FLICK',         0,  800,   10],
+    ['SWIPE_FULL',  0.1,    1, 0.01],
+    ['CENTRE_BAND', 0.05, 0.5, 0.01]
+  ];
+
+  // Summarise a full half-turn as its duration and the size of each overshoot,
+  // so a slider's effect is readable as numbers and not only as motion.
+  function previewPath() {
+    var s = simulate(0, 180, 0);
+    return Math.round(s.ms) + 'ms   ' + (s.peaks.length
+      ? 'overshoot ' + s.peaks.map(function (p) {
+          return (p > 0 ? '+' : '') + p;
+        }).join('  ')
+      : 'no overshoot');
+  }
+
+
+  function initTuning() {
+    var mono = 'ui-monospace,SFMono-Regular,Menlo,monospace';
+    var panel = document.createElement('div');
+    panel.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9;' +
+      'background:rgba(0,0,0,0.88);color:#eee;padding:8px 10px;max-height:56vh;' +
+      'overflow-y:auto;touch-action:auto;-webkit-user-select:none;user-select:none;' +
+      'font:12px/1.5 -apple-system,system-ui,sans-serif';
+
+    var head = document.createElement('div');
+    head.style.cssText = 'display:flex;justify-content:space-between;align-items:center';
+    var title = document.createElement('b');
+    title.textContent = 'Flip tuning';
+    var hide = document.createElement('button');
+    hide.textContent = 'hide';
+    hide.style.cssText = 'background:#333;color:#eee;border:0;border-radius:4px;padding:5px 12px;font:12px -apple-system,sans-serif';
+    head.appendChild(title);
+    head.appendChild(hide);
+    panel.appendChild(head);
+
+    var path = document.createElement('div');
+    path.style.cssText = 'font:11px/1.4 ' + mono + ';color:#7fd8c0;margin:4px 0 6px;word-break:break-word';
+    panel.appendChild(path);
+
+    var dump = document.createElement('div');
+    dump.style.cssText = 'font:11px/1.4 ' + mono + ';color:#f0b46b;margin-top:8px;word-break:break-word';
+
+    function refresh() {
+      path.textContent = previewPath();
+      dump.textContent = TUNABLES.map(function (t) {
+        return t[0] + '=' + window[t[0]];
+      }).join('   ');
+    }
+
+    TUNABLES.forEach(function (t) {
+      var name = t[0];
+      var row = document.createElement('label');
+      row.style.cssText = 'display:grid;grid-template-columns:92px 1fr 44px;' +
+        'gap:8px;align-items:center;margin:3px 0';
+      var lab = document.createElement('span');
+      lab.textContent = name;
+      var slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = t[1]; slider.max = t[2]; slider.step = t[3];
+      slider.value = window[name];
+      slider.style.width = '100%';
+      var val = document.createElement('span');
+      val.style.cssText = 'text-align:right;font:11px ' + mono;
+      val.textContent = window[name];
+      slider.addEventListener('input', function () {
+        window[name] = parseFloat(slider.value);
+        val.textContent = slider.value;
+        refresh();
+      });
+      row.appendChild(lab);
+      row.appendChild(slider);
+      row.appendChild(val);
+      panel.appendChild(row);
+    });
+
+    panel.appendChild(dump);
+
+    // Collapse to a small button: the panel covers the card's lower tap zones,
+    // so the bottom-centre X flip cannot be tested while it is open.
+    var show = document.createElement('button');
+    show.textContent = 'tuning';
+    show.style.cssText = 'position:fixed;right:8px;bottom:8px;z-index:9;display:none;' +
+      'background:rgba(0,0,0,0.72);color:#eee;border:0;border-radius:4px;' +
+      'padding:7px 13px;font:12px -apple-system,sans-serif';
+    hide.addEventListener('click', function () {
+      panel.style.display = 'none';
+      show.style.display = 'block';
+    });
+    show.addEventListener('click', function () {
+      panel.style.display = '';
+      show.style.display = 'none';
+    });
+
+    document.body.appendChild(panel);
+    document.body.appendChild(show);
+    refresh();
+  }
+
+  if (params.has('debug')) initTuning();
 
   // Block pinch-zoom and double-tap zoom.
   document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
