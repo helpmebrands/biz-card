@@ -39,6 +39,9 @@
     inset: 0;
     transform-style: preserve-3d;
     transition: transform 0.55s cubic-bezier(0.4, 0.0, 0.2, 1);
+    /* Own the gesture outright: the browser must not claim the drag for
+       panning, or pointermove stops firing part-way through a swipe. */
+    touch-action: none;
   }
 
   .face {
@@ -75,7 +78,6 @@
 
 <script>
   var card = document.getElementById('card');
-  var turns = 0;
 
   // Ids of the <text> layers in front.svg. These come from the Sketch layer
   // names, so re-exporting the artboard with renamed layers will break them.
@@ -153,9 +155,120 @@
       setField(svg, EMAIL_ID, params.get('email'));
     });
 
-  document.addEventListener('click', function () {
-    turns += 1;
-    card.style.transform = 'rotateY(' + (turns * 180) + 'deg)';
+  // --- Flip gestures -------------------------------------------------------
+  // Press position picks the axis and direction; the pressed edge is the one
+  // that swings away from the viewer, so the gesture reads as pushing it back.
+
+  var back = document.querySelector('.face.back');
+
+  // Half-width of the centre column, as a fraction of card width. Inside it a
+  // press tips the card about X; outside it, about Y.
+  var CENTRE_BAND = 0.25;
+  // Drag distance, as a fraction of card size, that equals a full half-turn.
+  var SWIPE_FULL = 0.45;
+  var SETTLE_MS = 450;
+  // Overshoot past the target and ease back: the bounce on settling.
+  var BOUNCE = 'cubic-bezier(0.34, 1.56, 0.64, 1)';
+
+  var angle = 0;      // resting angle, normalised to exactly 0 or 180
+  var axis = 'Y';     // axis the resting angle is expressed about
+  var drag = null;
+  var busy = false;
+  var flipPending = false;
+  var settleTimer = null;
+
+  function setTransform(a) {
+    card.style.transform = 'rotate' + axis + '(' + a + 'deg)';
+  }
+
+  function withoutTransition(fn) {
+    card.style.transition = 'none';
+    fn();
+    void card.offsetWidth; // flush, so the change cannot be animated
+    card.style.transition = '';
+  }
+
+  // The hidden face must be pre-rotated about the SAME axis the card turns on,
+  // otherwise it lands upside down: rotateX(180) on the card composed with
+  // rotateY(180) on the face equals rotateZ(180). Switching both together is
+  // invisible, because either pairing renders the same face upright.
+  function useAxis(next) {
+    if (next === axis) return;
+    axis = next;
+    back.style.transform = 'rotate' + axis + '(180deg)';
+    withoutTransition(function () { setTransform(angle); });
+  }
+
+  function zoneAt(x, y, rect) {
+    var dx = x - (rect.left + rect.width / 2);
+    var dy = y - (rect.top + rect.height / 2);
+    if (Math.abs(dx) <= rect.width * CENTRE_BAND) {
+      return { axis: 'X', dir: dy < 0 ? 1 : -1 };  // top edge back, or bottom
+    }
+    return { axis: 'Y', dir: dx > 0 ? 1 : -1 };    // right edge back, or left
+  }
+
+  // Rotation grows as the pressed edge is dragged toward the card's centre,
+  // which is the direction that edge visually travels as it recedes.
+  function progressOf(d) {
+    var span = d.axis === 'Y' ? d.rect.width : d.rect.height;
+    var moved = d.axis === 'Y' ? -d.dir * d.dx : d.dir * d.dy;
+    return Math.max(0, Math.min(1, moved / (span * SWIPE_FULL)));
+  }
+
+  function finalize() {
+    clearTimeout(settleTimer);
+    if (!busy) return;
+    busy = false;
+    if (!flipPending) return;
+    flipPending = false;
+    // Land on 0 or 180 only. The value just animated to may be -180 or 360,
+    // which are the same orientations, so re-stating it is invisible and keeps
+    // the angle from ever growing without bound.
+    angle = angle === 0 ? 180 : 0;
+    withoutTransition(function () { setTransform(angle); });
+  }
+
+  card.addEventListener('pointerdown', function (e) {
+    if (busy) return; // one gesture at a time; taps during a settle are dropped
+    var rect = card.getBoundingClientRect();
+    var zone = zoneAt(e.clientX, e.clientY, rect);
+    useAxis(zone.axis);
+    drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, dx: 0, dy: 0,
+             dir: zone.dir, axis: zone.axis, rect: rect, moved: false, p: 0 };
+    card.style.transition = 'none';
+    card.setPointerCapture(e.pointerId);
+  });
+
+  card.addEventListener('pointermove', function (e) {
+    if (!drag || e.pointerId !== drag.id) return;
+    drag.dx = e.clientX - drag.x0;
+    drag.dy = e.clientY - drag.y0;
+    if (Math.abs(drag.dx) > 6 || Math.abs(drag.dy) > 6) drag.moved = true;
+    drag.p = progressOf(drag);
+    setTransform(angle + drag.dir * 180 * drag.p);
+  });
+
+  function release(e) {
+    if (!drag || e.pointerId !== drag.id) return;
+    var d = drag;
+    drag = null;
+    // A tap always completes a turn. A swipe settles to whichever side of the
+    // halfway tipping point it was let go on.
+    flipPending = d.moved ? d.p > 0.5 : true;
+    busy = true;
+    card.style.transition = 'transform ' + SETTLE_MS + 'ms ' + BOUNCE;
+    setTransform(angle + (flipPending ? d.dir * 180 : 0));
+    // Releasing at rest changes nothing, so transitionend may never fire.
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(finalize, SETTLE_MS + 80);
+  }
+
+  card.addEventListener('pointerup', release);
+  card.addEventListener('pointercancel', release);
+
+  card.addEventListener('transitionend', function (e) {
+    if (e.target === card && e.propertyName === 'transform') finalize();
   });
 
   // Block pinch-zoom and double-tap zoom.
