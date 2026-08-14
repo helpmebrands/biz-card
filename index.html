@@ -139,6 +139,27 @@
 
   var params = new URLSearchParams(location.search);
 
+  // Launched from the home screen, the OS navigates to the manifest's
+  // start_url, which carries no query string -- so the values that
+  // personalised the card are gone before this runs. Remember them from the
+  // visit that did have them, and fall back to those when the URL is bare.
+  var FIELD_STORE = 'helpme-card-fields';
+
+  function personalisation() {
+    var live = { name: params.get('name'), email: params.get('email') };
+    try {
+      if (live.name || live.email) {
+        localStorage.setItem(FIELD_STORE, JSON.stringify(live));
+        return live;
+      }
+      var saved = JSON.parse(localStorage.getItem(FIELD_STORE) || '{}');
+      return { name: saved.name || null, email: saved.email || null };
+    } catch (err) {
+      // Safari in private mode throws on storage; the URL is still authoritative.
+      return live;
+    }
+  }
+
   fetch('./images/front.svg')
     .then(function (r) { return r.text(); })
     .then(function (markup) {
@@ -150,8 +171,9 @@
       clipToViewBox(svg);
       // Must be in the rendered tree before getBBox() will measure text.
       document.getElementById('front').appendChild(svg);
-      setField(svg, NAME_ID, params.get('name'));
-      setField(svg, EMAIL_ID, params.get('email'));
+      var fields = personalisation();
+      setField(svg, NAME_ID, fields.name);
+      setField(svg, EMAIL_ID, fields.email);
     });
 
   // --- Flip gestures -------------------------------------------------------

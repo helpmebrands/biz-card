@@ -24,5 +24,10 @@ self.addEventListener('activate', (e) => {
 });
 
 self.addEventListener('fetch', (e) => {
-  e.respondWith(caches.match(e.request).then((r) => r || fetch(e.request)));
+  // ignoreSearch so a personalised URL still matches the cached page: cache
+  // keys include the query string, so index.html?name=... would otherwise miss
+  // and only work while online.
+  e.respondWith(
+    caches.match(e.request, { ignoreSearch: true }).then((r) => r || fetch(e.request))
+  );
 });
