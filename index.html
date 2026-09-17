@@ -176,6 +176,46 @@
       setField(svg, EMAIL_ID, fields.email);
     });
 
+  // --- Share contact -------------------------------------------------------
+  // The contact details live in the manifest: browsers ignore keys they do
+  // not know, so it doubles as plain config. There is no API for reading the
+  // installed manifest, so the page fetches the file itself.
+
+  // How long a press must be held, without moving, to become a share.
+  var HOLD_MS = 500;
+
+  var contact = null;
+
+  fetch('./manifest.webmanifest')
+    .then(function (r) { return r.json(); })
+    .then(function (m) { contact = m.contact || null; });
+
+  function vcard(c) {
+    var space = c.name.lastIndexOf(' ');
+    var given = space < 0 ? c.name : c.name.slice(0, space);
+    var family = space < 0 ? '' : c.name.slice(space + 1);
+    return [
+      'BEGIN:VCARD',
+      'VERSION:3.0',
+      'N:' + family + ';' + given + ';;;',
+      'FN:' + c.name,
+      'ORG:' + c.company,
+      'TEL;TYPE=CELL,VOICE:' + c.phone,
+      'EMAIL;TYPE=INTERNET,WORK:' + c.email,
+      'END:VCARD'
+    ].join('\r\n') + '\r\n';
+  }
+
+  // Must run inside a user activation, which for touch is the lift and not
+  // the press -- so the hold arms the share and pointerup fires it.
+  function shareContact() {
+    if (!contact || !navigator.share) return;
+    var file = new File([vcard(contact)], contact.name + '.vcf', { type: 'text/vcard' });
+    var data = { files: [file] };
+    if (navigator.canShare && !navigator.canShare(data)) return;
+    navigator.share(data).catch(function () {});
+  }
+
   // --- Flip gestures -------------------------------------------------------
   // Press position picks the axis and direction; the pressed edge is the one
   // that swings away from the viewer, so the gesture reads as pushing it back.
@@ -340,10 +380,12 @@
     // drag and its velocity is left intact, so grabbing mid-flight is seamless
     // and a tap mid-flight keeps the momentum already in play.
     stopLoop();
-    grab = { id: e.pointerId, x0: e.clientX, y0: e.clientY, rect: rect,
-             zone: zoneAt(e.clientX, e.clientY, rect), base: angle,
-             moved: false,
-             vel: 0, lastT: e.timeStamp, lastDeg: 0 };
+    var g = { id: e.pointerId, x0: e.clientX, y0: e.clientY, rect: rect,
+              zone: zoneAt(e.clientX, e.clientY, rect), base: angle,
+              moved: false, held: false,
+              vel: 0, lastT: e.timeStamp, lastDeg: 0 };
+    g.hold = setTimeout(function () { g.held = true; }, HOLD_MS);
+    grab = g;
     settled = false;
     card.setPointerCapture(e.pointerId);
   });
@@ -355,6 +397,7 @@
     if (!grab.moved) {
       if (Math.abs(dx) < DRAG_MIN && Math.abs(dy) < DRAG_MIN) return;
       grab.moved = true;
+      clearTimeout(grab.hold);
       // Works in flight, not only from rest: near a flat orientation the card
       // snaps and swaps axis, so a swipe across the previous one is picked up.
       if (trySwitchAxis(Math.abs(dx) >= Math.abs(dy) ? 'Y' : 'X')) {
@@ -383,8 +426,14 @@
     if (!grab || e.pointerId !== grab.id) return;
     var g = grab;
     grab = null;
+    clearTimeout(g.hold);
 
-    if (!g.moved) {
+    if (g.held) {
+      // A hold shares rather than flips. The spring below simply resumes
+      // toward the target the press interrupted. A cancelled pointer is not
+      // a user activation, so only a real lift may open the sheet.
+      if (e.type === 'pointerup') shareContact();
+    } else if (!g.moved) {
       // A tap. The press position picks the axis whenever the card is flat
       // enough to allow it; otherwise only the direction comes from the press.
       trySwitchAxis(g.zone.axis);
