@@ -137,58 +137,35 @@
     svg.appendChild(group);
   }
 
-  var params = new URLSearchParams(location.search);
-
-  // Launched from the home screen, the OS navigates to the manifest's
-  // start_url, which carries no query string -- so the values that
-  // personalised the card are gone before this runs. Remember them from the
-  // visit that did have them, and fall back to those when the URL is bare.
-  var FIELD_STORE = 'helpme-card-fields';
-
-  function personalisation() {
-    var live = { name: params.get('name'), email: params.get('email') };
-    try {
-      if (live.name || live.email) {
-        localStorage.setItem(FIELD_STORE, JSON.stringify(live));
-        return live;
-      }
-      var saved = JSON.parse(localStorage.getItem(FIELD_STORE) || '{}');
-      return { name: saved.name || null, email: saved.email || null };
-    } catch (err) {
-      // Safari in private mode throws on storage; the URL is still authoritative.
-      return live;
-    }
-  }
-
-  fetch('./images/front.svg')
-    .then(function (r) { return r.text(); })
-    .then(function (markup) {
-      var doc = new DOMParser().parseFromString(markup, 'image/svg+xml');
-      var svg = document.importNode(doc.documentElement, true);
-      // Drop the fixed px size so the CSS 100%/100% rule governs scaling.
-      svg.removeAttribute('width');
-      svg.removeAttribute('height');
-      clipToViewBox(svg);
-      // Must be in the rendered tree before getBBox() will measure text.
-      document.getElementById('front').appendChild(svg);
-      var fields = personalisation();
-      setField(svg, NAME_ID, fields.name);
-      setField(svg, EMAIL_ID, fields.email);
-    });
-
-  // --- Share contact -------------------------------------------------------
   // The contact details live in the manifest: browsers ignore keys they do
   // not know, so it doubles as plain config. There is no API for reading the
-  // installed manifest, so the page fetches the file itself.
+  // installed manifest, so the page fetches the file itself. The same details
+  // are printed on the front face and shared as a vCard.
+  var contact = null;
+
+  Promise.all([
+    fetch('./manifest.webmanifest').then(function (r) { return r.json(); }),
+    fetch('./images/front.svg').then(function (r) { return r.text(); })
+  ]).then(function (loaded) {
+    contact = loaded[0].contact || null;
+    var doc = new DOMParser().parseFromString(loaded[1], 'image/svg+xml');
+    var svg = document.importNode(doc.documentElement, true);
+    // Drop the fixed px size so the CSS 100%/100% rule governs scaling.
+    svg.removeAttribute('width');
+    svg.removeAttribute('height');
+    clipToViewBox(svg);
+    // Must be in the rendered tree before getBBox() will measure text.
+    document.getElementById('front').appendChild(svg);
+    if (contact) {
+      setField(svg, NAME_ID, contact.name);
+      setField(svg, EMAIL_ID, contact.email);
+    }
+  });
+
+  // --- Share contact -------------------------------------------------------
 
   // How long a press must be held, without moving, to become a share.
   var HOLD_MS = 500;
-
-  var contact = null;
-
-  fetch('./manifest.webmanifest')
-    .then(function (r) { return r.json(); })
-    .then(function (m) { contact = m.contact || null; });
 
   function vcard(c) {
     var space = c.name.lastIndexOf(' ');
@@ -355,25 +332,6 @@
     return { axis: 'Y', dir: dx > 0 ? 1 : -1 };    // right edge back, or left
   }
 
-  // Run the same integrator off-screen, so the tuning panel reports what will
-  // actually happen rather than a separate approximation of it.
-  function simulate(from, to, v0) {
-    var x = from, v = v0, t = 0, h = 0.004, i = 0, prevV = v0, peaks = [];
-    var k = OMEGA * OMEGA, c = 2 * ZETA * OMEGA;
-    while (t < 30) {
-      v += (-k * (x - to) - c * v) * h;
-      x += v * h;
-      t += h;
-      if (i > 0 && (prevV > 0) !== (v > 0) && Math.abs(x - to) > 0.3) {
-        peaks.push(Math.round((x - to) * 10) / 10);
-      }
-      prevV = v;
-      i++;
-      if (Math.abs(x - to) < SETTLE_EPS && Math.abs(v) < SETTLE_VEL) break;
-    }
-    return { ms: t * 1000, peaks: peaks };
-  }
-
   card.addEventListener('pointerdown', function (e) {
     var rect = card.getBoundingClientRect();
     // Take the card over wherever it happens to be. Its angle carries into the
@@ -453,115 +411,14 @@
   card.addEventListener('pointerup', release);
   card.addEventListener('pointercancel', release);
 
-  // --- Tuning panel --------------------------------------------------------
-  // Enabled with ?debug on the URL, so it costs nothing in normal use. These
-  // names are top-level vars, hence window[name] reaches them: a slider writes
-  // straight to the live value and the next tap uses it immediately.
-
-  var TUNABLES = [
-    ['OMEGA',         4,   30,  0.5],
-    ['ZETA',       0.05,    1, 0.01],
-    ['FLICK',         0,  800,   10],
-    ['AXIS_SNAP',     0,   90,    1],
-    ['SWIPE_FULL',  0.1,    1, 0.01],
-    ['CENTRE_BAND', 0.05, 0.5, 0.01]
-  ];
-
-  // Summarise a full half-turn as its duration and the size of each overshoot,
-  // so a slider's effect is readable as numbers and not only as motion.
-  function previewPath() {
-    var s = simulate(0, 180, 0);
-    return Math.round(s.ms) + 'ms   ' + (s.peaks.length
-      ? 'overshoot ' + s.peaks.map(function (p) {
-          return (p > 0 ? '+' : '') + p;
-        }).join('  ')
-      : 'no overshoot');
-  }
-
-
-  function initTuning() {
-    var mono = 'ui-monospace,SFMono-Regular,Menlo,monospace';
-    var panel = document.createElement('div');
-    panel.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9;' +
-      'background:rgba(0,0,0,0.88);color:#eee;padding:8px 10px;max-height:56vh;' +
-      'overflow-y:auto;touch-action:auto;-webkit-user-select:none;user-select:none;' +
-      'font:12px/1.5 -apple-system,system-ui,sans-serif';
-
-    var head = document.createElement('div');
-    head.style.cssText = 'display:flex;justify-content:space-between;align-items:center';
-    var title = document.createElement('b');
-    title.textContent = 'Flip tuning';
-    var hide = document.createElement('button');
-    hide.textContent = 'hide';
-    hide.style.cssText = 'background:#333;color:#eee;border:0;border-radius:4px;padding:5px 12px;font:12px -apple-system,sans-serif';
-    head.appendChild(title);
-    head.appendChild(hide);
-    panel.appendChild(head);
-
-    var path = document.createElement('div');
-    path.style.cssText = 'font:11px/1.4 ' + mono + ';color:#7fd8c0;margin:4px 0 6px;word-break:break-word';
-    panel.appendChild(path);
-
-    var dump = document.createElement('div');
-    dump.style.cssText = 'font:11px/1.4 ' + mono + ';color:#f0b46b;margin-top:8px;word-break:break-word';
-
-    function refresh() {
-      path.textContent = previewPath();
-      dump.textContent = TUNABLES.map(function (t) {
-        return t[0] + '=' + window[t[0]];
-      }).join('   ');
-    }
-
-    TUNABLES.forEach(function (t) {
-      var name = t[0];
-      var row = document.createElement('label');
-      row.style.cssText = 'display:grid;grid-template-columns:92px 1fr 44px;' +
-        'gap:8px;align-items:center;margin:3px 0';
-      var lab = document.createElement('span');
-      lab.textContent = name;
-      var slider = document.createElement('input');
-      slider.type = 'range';
-      slider.min = t[1]; slider.max = t[2]; slider.step = t[3];
-      slider.value = window[name];
-      slider.style.width = '100%';
-      var val = document.createElement('span');
-      val.style.cssText = 'text-align:right;font:11px ' + mono;
-      val.textContent = window[name];
-      slider.addEventListener('input', function () {
-        window[name] = parseFloat(slider.value);
-        val.textContent = slider.value;
-        refresh();
-      });
-      row.appendChild(lab);
-      row.appendChild(slider);
-      row.appendChild(val);
-      panel.appendChild(row);
-    });
-
-    panel.appendChild(dump);
-
-    // Collapse to a small button: the panel covers the card's lower tap zones,
-    // so the bottom-centre X flip cannot be tested while it is open.
-    var show = document.createElement('button');
-    show.textContent = 'tuning';
-    show.style.cssText = 'position:fixed;right:8px;bottom:8px;z-index:9;display:none;' +
-      'background:rgba(0,0,0,0.72);color:#eee;border:0;border-radius:4px;' +
-      'padding:7px 13px;font:12px -apple-system,sans-serif';
-    hide.addEventListener('click', function () {
-      panel.style.display = 'none';
-      show.style.display = 'block';
-    });
-    show.addEventListener('click', function () {
-      panel.style.display = '';
-      show.style.display = 'none';
-    });
-
-    document.body.appendChild(panel);
-    document.body.appendChild(show);
-    refresh();
-  }
-
-  if (params.has('debug')) initTuning();
+  // WebKit runs its long-press recogniser (text selection, callout) on the
+  // raw touch stream, and when it claims a stationary finger it cancels the
+  // pointer: the hold ends in pointercancel and pointerup never arrives, so
+  // the share is never within a user activation. -webkit-touch-callout does
+  // not reach that recogniser; cancelling touchstart does. Pointer events
+  // are dispatched before touchstart and keep flowing regardless.
+  card.addEventListener('touchstart', function (e) { e.preventDefault(); },
+    { passive: false });
 
   // Block pinch-zoom and double-tap zoom.
   document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
