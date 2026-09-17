@@ -1,0 +1,4 @@
+# Written by the deploy workflow (a copy of index.html) so Pages can serve
+# /card/<name>/<email>. Generated, never committed -- a committed copy would
+# drift from the page it is meant to mirror.
+/404.html

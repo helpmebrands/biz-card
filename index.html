@@ -9,6 +9,24 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="apple-mobile-web-app-title" content="HelpMe Card">
+<script>
+  // Personalisation rides in the path: /card/<name>/<email>. Pages has no
+  // rewrite rules, so that path matches no file and 404.html -- a copy of this
+  // page, made at deploy time -- answers instead. Everything here loads
+  // relatively, and relative URLs would resolve against the card path
+  // (./images/front.svg -> /card/<name>/images/front.svg), so pin <base> back
+  // to the app root before the first URL below is parsed. Inserting the element
+  // is enough: <base> governs whatever the parser reaches after it.
+  var CARD_PREFIX = '/card/';
+
+  (function () {
+    var at = location.pathname.indexOf(CARD_PREFIX);
+    if (at === -1) return;
+    var base = document.createElement('base');
+    base.setAttribute('href', location.pathname.slice(0, at + 1));
+    document.head.appendChild(base);
+  })();
+</script>
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="apple-touch-icon" href="./icons/icon-192.png">
 <style>
@@ -71,12 +89,20 @@
   <div class="scene">
     <div class="card" id="card">
       <div class="face front" id="front"></div>
-      <img class="face back" src="./images/back.png" alt="">
+      <img class="face back" data-src="./images/back.png" alt="">
     </div>
   </div>
 
 <script>
   var card = document.getElementById('card');
+  var back = document.querySelector('.face.back');
+
+  // The back face carries data-src rather than src: the preload scanner reads
+  // the raw markup and resolves a src against the document URL, which on a
+  // /card/ path means fetching the image from under the card path and getting
+  // the 404 fallback back. Assigning here resolves it against <base> instead,
+  // so the image is fetched once, from the app root.
+  back.src = back.getAttribute('data-src');
 
   // Ids of the <text> layers in front.svg. These come from the Sketch layer
   // names, so re-exporting the artboard with renamed layers will break them.
@@ -139,14 +165,50 @@
 
   var params = new URLSearchParams(location.search);
 
+  function decodeSegment(value) {
+    try {
+      return decodeURIComponent(value);
+    } catch (err) {
+      // A stray % leaves the segment undecodable; showing the raw text beats
+      // dropping the field.
+      return value;
+    }
+  }
+
+  // /card/<name>/<email>. Both segments are optional and order does not
+  // matter: an address always carries '@' and a display name never should, so
+  // each segment identifies itself and neither needs a placeholder to hold an
+  // empty slot. A path also leaves '+' alone, so kcook+card@... survives here
+  // where a query string would have decoded it to a space.
+  function pathFields() {
+    var fields = { name: null, email: null };
+    var at = location.pathname.indexOf(CARD_PREFIX);
+    if (at === -1) return fields;
+
+    location.pathname.slice(at + CARD_PREFIX.length).split('/').forEach(function (segment) {
+      if (!segment) return;
+      var value = decodeSegment(segment);
+      var key = value.indexOf('@') === -1 ? 'name' : 'email';
+      if (!fields[key]) fields[key] = value;
+    });
+    return fields;
+  }
+
   // Launched from the home screen, the OS navigates to the manifest's
-  // start_url, which carries no query string -- so the values that
-  // personalised the card are gone before this runs. Remember them from the
-  // visit that did have them, and fall back to those when the URL is bare.
+  // start_url, which carries neither the card path nor a query string -- so
+  // the values that personalised the card are gone before this runs. Remember
+  // them from the visit that did have them, and fall back to those when the
+  // URL is bare.
   var FIELD_STORE = 'helpme-card-fields';
 
   function personalisation() {
-    var live = { name: params.get('name'), email: params.get('email') };
+    var path = pathFields();
+    // Query strings are the old form of the link. Cards already shared that
+    // way keep working; the path wins when both are present.
+    var live = {
+      name: path.name || params.get('name'),
+      email: path.email || params.get('email')
+    };
     try {
       if (live.name || live.email) {
         localStorage.setItem(FIELD_STORE, JSON.stringify(live));
@@ -179,8 +241,6 @@
   // --- Flip gestures -------------------------------------------------------
   // Press position picks the axis and direction; the pressed edge is the one
   // that swings away from the viewer, so the gesture reads as pushing it back.
-
-  var back = document.querySelector('.face.back');
 
   // Half-width of the centre column, as a fraction of card width. Inside it a
   // press tips the card about X; outside it, about Y.
