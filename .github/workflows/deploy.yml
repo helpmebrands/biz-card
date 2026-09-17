@@ -48,13 +48,6 @@ jobs:
           }
           grep -n '^const CACHE' sw.js
 
-      # Pages has no rewrite rules, so /card/<name>/<email> matches no file and
-      # Pages serves 404.html for it. Ship the app under that name too and the
-      # card path resolves: the page reads the personalisation off its own URL.
-      # Copied at deploy time rather than committed so the two cannot drift.
-      - name: Serve card paths through the 404 fallback
-        run: cp index.html 404.html
-
       # The app is plain static files, so the repo root ships as-is. No build
       # step, and no .nojekyll needed: this action uploads an artifact directly
       # rather than running the content through Jekyll.

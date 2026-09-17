@@ -1,4 +1,4 @@
-const CACHE = 'card-v5';
+const CACHE = 'card-v4';
 const ASSETS = [
   './',
   './index.html',
@@ -24,18 +24,8 @@ self.addEventListener('activate', (e) => {
 });
 
 self.addEventListener('fetch', (e) => {
-  // A card link is a path -- /card/<name>/<email> -- that exists only because
-  // Pages falls back to 404.html. It matches no cache entry and no real file,
-  // so serve the shell for every navigation and let the page read its own
-  // path. This also spares returning visitors the 404 status the fallback
-  // carries.
-  if (e.request.mode === 'navigate') {
-    e.respondWith(caches.match('./index.html').then((r) => r || fetch(e.request)));
-    return;
-  }
-
-  // ignoreSearch so ?debug, and the older ?name=... links, still match the
-  // cached entry: cache keys include the query string and would otherwise miss
+  // ignoreSearch so a personalised URL still matches the cached page: cache
+  // keys include the query string, so index.html?name=... would otherwise miss
   // and only work while online.
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true }).then((r) => r || fetch(e.request))
