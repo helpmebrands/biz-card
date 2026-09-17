@@ -28,6 +28,32 @@
   })();
 </script>
 <link rel="manifest" href="./manifest.webmanifest">
+<script>
+  // An installed icon launches at the URL recorded when it was added, not at
+  // whatever link is tapped later, and the manifest's start_url is what gets
+  // recorded. That is how ?name=... was lost, and it would lose /card/... just
+  // the same.
+  //
+  // Dropping start_url makes the spec fall back to the document the manifest
+  // was applied to, which is what we want -- but Chromium does not apply that
+  // default to its install criteria: without the field it reports
+  // start-url-not-valid and refuses to install the app at all, on every path.
+  // So the manifest keeps start_url, and the link is withdrawn on iOS only.
+  //
+  // With no manifest, iOS falls back to the URL on screen and to the
+  // apple-mobile-web-app-* tags above, which already describe this app in
+  // full: standalone display, title, status bar and touch icon. The manifest
+  // fields iOS would lose are orientation, which iOS does not honour from a
+  // manifest anyway, and background_color.
+  //
+  // navigator.standalone exists only in Safari on iOS and iPadOS, so it marks
+  // exactly the browser that installs by this route -- no user agent string
+  // needed.
+  if ('standalone' in navigator) {
+    var manifestLink = document.querySelector('link[rel="manifest"]');
+    if (manifestLink) manifestLink.remove();
+  }
+</script>
 <link rel="apple-touch-icon" href="./icons/icon-192.png">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -194,11 +220,11 @@
     return fields;
   }
 
-  // Launched from the home screen, the OS navigates to the manifest's
-  // start_url, which carries neither the card path nor a query string -- so
-  // the values that personalised the card are gone before this runs. Remember
-  // them from the visit that did have them, and fall back to those when the
-  // URL is bare.
+  // On iOS the manifest is withdrawn (see the head) so a home screen icon
+  // launches at the card it was added from. Everywhere else start_url stands
+  // and the icon opens the app root, so this store still carries the card:
+  // remember the fields from a visit that had them, and fall back to those
+  // when the URL arrives bare.
   var FIELD_STORE = 'helpme-card-fields';
 
   function personalisation() {
